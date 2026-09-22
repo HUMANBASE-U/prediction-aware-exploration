@@ -1,65 +1,67 @@
-<p align="center">
-<h1 align="center">PIPE Planner: Pathwise Information Gain with Map Predictions for Indoor Robot Exploration</h1>
-<h3 class="is-size-5 has-text-weight-bold" style="color: orange;" align="center">
-    IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS) 2025
-</h3>
-  <p align="center">
-    <a href="https://seungjaebk.github.io/" target="_blank"><strong>Seungjae Baek*</strong></a>
-    ·
-    <a href="https://bradymoon.com/" target="_blank"><strong>Brady Moon*</strong></a>
-    ·
-    <a href="https://seungchan-kim.github.io" target="_blank"><strong>Seungchan Kim*</strong></a>
-     <br>
-    <a href="https://caomuqing.github.io/" target="_blank"><strong>Muqing Cao</strong></a>
-    ·
-    <a href="https://cherieho.com/" target="_blank"><strong>Cherie Ho</strong></a>
-    ·
-    <a href="https://theairlab.org/team/sebastian/" target="_blank"><strong>Sebastian Scherer</strong></a>
-    ·
-    <a href="https://rml-unist.notion.site/" target="_blank"><strong>Jeong hwan Jeon</strong></a>
-    <br>
-  </p>
-</p>
-  <h3 align="center"><a href="https://arxiv.org/abs/2503.07504">Paper</a> | <a href="https://pipe-planner.github.io">Project Page</a> | <a href="https://youtu.be/oZEqbCBRn-I">Video</a></h3>
-  <div align="center"></div>
+# Prediction-Aware Indoor Exploration
 
-## Preliminary Setup
-### Clone the github repository
-Clone the repository as below.
+This repository is built upon the [PIPE Planner](https://github.com/castacks/pipe-planner) codebase and is used for our research on prediction-aware indoor robot exploration.
 
-    git clone --branch init-import --single-branch https://github.com/castacks/pipe-planner.git
-    cd pipe-planner
+This is a standalone research repository. Clone this repository directly to reproduce or extend our work; you do not need to fork or clone the original PIPE Planner repository separately.
+
+## Installation
+
+### Clone this repository
+
+```bash
+git clone git@github.com:HUMANBASE-U/prediction-aware-exploration.git
+cd prediction-aware-exploration
+```
+
+If you have not configured GitHub SSH access, use HTTPS instead:
+
+```bash
+git clone https://github.com/HUMANBASE-U/prediction-aware-exploration.git
+cd prediction-aware-exploration
+```
 
 ### Set up Conda Environment
-Create environment with the name 'pipe' from lama's conda_env.yml
-    
-    conda env create -n pipe -f lama/conda_env.yml
-    conda activate pipe
+
+Create an environment named `pipe` using the environment file inherited from the PIPE Planner codebase:
+
+```bash
+conda env create -n pipe -f lama/conda_env.yml
+conda activate pipe
+```
 
 #### Build from Source to install 'range_libc'
 
-    cd range_libc/pywrapper
-    
-    # Install build dependencies (if needed)
-    conda install -y cython
-    
-    # Build and install
-    python setup.py install
-    
-    # Verify installation
-    cd ../..
-    python -c "import range_libc; print('range_libc installed successfully')"
+Run these commands from the repository root:
+
+```bash
+cd range_libc/pywrapper
+
+# Install build dependencies (if needed)
+conda install -y cython
+
+# Build and install
+python setup.py install
+
+# Return to the repository root and verify the installation
+cd ../..
+python -c "import range_libc; print('range_libc installed successfully')"
+```
 
 ### Download pretrained prediction models (KTH dataset)
 You can download pretrained models from this <a href="https://drive.google.com/drive/u/0/folders/1u9WZ9ftwaMbP-RVySuNSVEdUDV_x4Dw6">link</a>. Place the zip file under `pretrained_models` directory and unzip the file. 
 
-    mv ~/Downloads/weights.zip ~/pipe-planner/pretrained_models/
-    cd ~/pipe-planner/pretrained_models/
-    unzip weights.zip
+From the repository root, run:
+
+```bash
+mv ~/Downloads/weights.zip pretrained_models/
+cd pretrained_models
+unzip weights.zip
+cd ..
+```
 
 The `pretrained_model` directory and its subdirectories should be organized as below: 
 
-    pipe-planner
+    prediction-aware-exploration
     ├── pretrained_models
         ├── weights
             ├── big_lama
@@ -87,13 +89,24 @@ If true, your algorithm runs until reaching the maximum time step budget (1500 f
 ### Run the script
 Run the 'explore.py' script as below:
 
-    cd ../scripts/
-    python3 explore.py
+```bash
+cd scripts
+python3 explore.py
+```
+
+## Upstream Project
+
+This project builds on **PIPE Planner: Pathwise Information Gain with Map Predictions for Indoor Robot Exploration**, published at IROS 2025.
+
+- [Original repository](https://github.com/castacks/pipe-planner)
+- [Paper](https://arxiv.org/abs/2503.07504)
+- [Project page](https://pipe-planner.github.io)
+- [Video](https://youtu.be/oZEqbCBRn-I)
 
 
 ## Citation
 
-If you find our paper or code useful, please cite us:
+If you use the PIPE Planner components of this repository, please cite the original work:
 
 ```bib
 @inproceedings{baek2025pipe,
@@ -103,4 +116,4 @@ If you find our paper or code useful, please cite us:
   year={2025},
   pages={7684-7691},
   doi={10.1109/IROS60139.2025.11246190}}
-
+```
