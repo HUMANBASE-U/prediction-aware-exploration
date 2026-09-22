@@ -2,7 +2,7 @@
 
 This repository is built upon the [PIPE Planner](https://github.com/castacks/pipe-planner) codebase and is used for our research on prediction-aware indoor robot exploration.
 
-This is a standalone research repository. Clone this repository directly to reproduce or extend our work; you do not need to fork or clone the original PIPE Planner repository separately.
+This is a standalone research repository. Clone this repository directly to reproduce or extend our work.
 
 ## Installation
 
