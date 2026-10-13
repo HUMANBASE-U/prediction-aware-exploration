@@ -1,0 +1,8 @@
+defaults:
+  - adaptive_trust
+  - _self_
+
+# Controlled geometry corruption; only unknown-cell predictions are blended
+# toward their inverse. LiDAR observations and the simulator map are unchanged.
+output_folder_name: experiments/adaptive_trust_degraded
+prediction_degradation_strength: 0.75

@@ -1,0 +1,18 @@
+defaults:
+  - base
+  - _self_
+
+# Paired runs share the same map, start pose, sensors, models, and step budget.
+# Results stay separate from the original experiments/ runs.
+output_folder_name: experiments/adaptive_trust
+modes_to_test: ['pipe', 'pw-nbv-2d', 'fixed-pipe', 'adaptive-pipe']
+log_iou: false
+seed: 0
+prediction_degradation_strength: 0.0
+
+adaptive_trust:
+  beta: 0.9
+  k: 2.0
+  initial_reliability: 1.0
+  min_new_cells: 100
+  fixed_reliability: 0.5

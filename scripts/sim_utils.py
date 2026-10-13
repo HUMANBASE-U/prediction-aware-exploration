@@ -69,8 +69,8 @@ class FrontierPlanner():
     def __init__(self, score_mode=None):
         self.region_size_threshold = 10 # Filters out frontier regions that are smaller than this
         self.score_mode = score_mode
-        assert score_mode in ['nearest', 'visvar', 'visunk','nbv-2d','onlyvar', 'mapex', 'hector', 'hectoraug', 'pipe', 'pw-nbv-2d'],\
-            "score_mode must be one of ['nearest', 'visvar', 'visunk','nbv-2d','onlyvar', 'mapex', 'hector, 'hectoraug', 'pipe', 'pw-nbv-2d']"
+        assert score_mode in ['nearest', 'visvar', 'visunk','nbv-2d','onlyvar', 'mapex', 'hector', 'hectoraug', 'pipe', 'pw-nbv-2d', 'fixed-pipe', 'adaptive-pipe'],\
+            "invalid frontier scoring mode: {}".format(score_mode)
     def get_frontier_centers_given_obs_map(self, obs_map):
         """
         Get frontier centers given global observed map. 
@@ -151,7 +151,7 @@ class FrontierPlanner():
             # Normalize frontier_val by the distance to current pose 
             frontier_val = frontier_val / (cost_dist[frontier_i]) #!
         return frontier_val, flooded_grid
-    
+
     def score_frontiers(self, frontier_region_centers, cur_pose, pose_list, pred_maputils, pred_vis_config, obs_map=None, mean_map=None, var_map=None):
         frontier_region_centers = np.array(frontier_region_centers)
         pose_list = np.array(pose_list)
@@ -349,7 +349,7 @@ class FrontierPlanner():
 
     def score_frontiers_pathwise(self, t, frontier_region_centers, path_collection,
                                  pred_maputils, pred_vis_config,
-                                 obs_map, mean_map, var_map):
+                                 obs_map, mean_map, var_map, return_all_masks=False):
         
         frontier_region_centers = np.array(frontier_region_centers)
         best_frontier_val = -np.inf
@@ -437,13 +437,61 @@ class FrontierPlanner():
 
         locked_frontier_center  = frontier_region_centers[best_ind]
 
-        return (frontier_region_centers,
+        result = (frontier_region_centers,
                 frontier_cost_list,
                 viz_most_flooded_grid,
                 viz_medium_flooded_grid,
                 best_ind,
                 medium_ind,
                 locked_frontier_center)
+        if return_all_masks:
+            return result + (flooded_grid_list,)
+        return result
+
+    def score_frontiers_adaptive(self, t, frontier_centers, paths,
+                                 pred_maputils, pred_vis_config,
+                                 obs_map, mean_map, var_map, reliability):
+        """Evaluate the exact same frontiers and A* paths under both models."""
+        from scripts.adaptive_trust import fuse_scores
+
+        pipe = FrontierPlanner(score_mode='pipe')
+        classical = FrontierPlanner(score_mode='pw-nbv-2d')
+        pipe_result = pipe.score_frontiers_pathwise(
+            t, frontier_centers, [path.copy() for path in paths],
+            pred_maputils, pred_vis_config, obs_map, mean_map, var_map,
+            return_all_masks=True)
+        classical_result = classical.score_frontiers_pathwise(
+            t, frontier_centers, [path.copy() for path in paths],
+            pred_maputils, pred_vis_config, obs_map, mean_map, None,
+            return_all_masks=True)
+        centers = pipe_result[0]
+        if not np.array_equal(centers, classical_result[0]):
+            raise RuntimeError('PIPE and classical frontier sets differ')
+        pipe_scores = -pipe_result[1]
+        classical_scores = -classical_result[1]
+        best, fused, pipe_norm, classical_norm = fuse_scores(
+            pipe_scores, classical_scores, reliability,
+            pipe_best=pipe_result[4], classical_best=classical_result[4])
+        order = np.argsort(-fused, kind='stable')
+        medium = int(next((i for i in order if i != best), -1))
+        masks = pipe_result[7] if reliability > 0 else classical_result[7]
+        def finite_scores(values):
+            return [float(value) if np.isfinite(value) else None
+                    for value in values]
+        diagnostics = {
+            'pipe_scores': finite_scores(pipe_scores),
+            'classical_scores': finite_scores(classical_scores),
+            'normalized_pipe': pipe_norm.tolist(),
+            'normalized_classical': classical_norm.tolist(),
+            'fused_scores': fused.tolist(),
+            'pipe_best': int(pipe_result[4]),
+            'classical_best': int(classical_result[4]),
+            'chosen': best,
+            'reliability': float(reliability),
+        }
+        return (centers, -fused, masks[best],
+                masks[medium] if medium >= 0 else None,
+                best, medium, centers[best]), diagnostics
 
 
 
@@ -554,6 +602,3 @@ class Mapper():
     
     def get_inflated_planning_maps(self, unknown_as_occ=False):
         return self.inflate_map(self.obs_map, unknown_as_occ=False)
-
-
-    

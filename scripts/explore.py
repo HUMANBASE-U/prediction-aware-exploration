@@ -23,6 +23,7 @@ import sys
 sys.path.append('../')
 from scripts import simple_mask_utils as smu 
 import scripts.sim_utils as sim_utils
+from scripts.adaptive_trust import OnlineReliability, degrade_unknown_geometry
 import upen_baseline
 import matplotlib
 matplotlib.use('TkAgg')
@@ -124,7 +125,7 @@ def reselect_frontier_from_frontier_region_centers(frontier_region_centers, tota
 def determine_local_planner(mode):
     if mode == 'upen':
         return 'astar'
-    elif mode in ['nearest', 'visvar', 'visunk', 'nbv-2d', 'onlyvar', 'mapex', 'pipe', 'pw-nbv-2d']:
+    elif mode in ['nearest', 'visvar', 'visunk', 'nbv-2d', 'onlyvar', 'mapex', 'pipe', 'pw-nbv-2d', 'fixed-pipe', 'adaptive-pipe']:
         return 'astar'
     elif mode == 'hector' or mode == 'hectoraug':
         return 'gradient'
@@ -239,6 +240,9 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
     start_pose, unknown_as_occ, use_distance_transform_for_planning, upen_config=None):
     try: 
         print("exp_title:", exp_title)
+        if collect_opts.get('seed') is not None:
+            np.random.seed(int(collect_opts.seed))
+            torch.manual_seed(int(collect_opts.seed))
         start_exp_time = time.time()
         pixel_per_meter = lidar_sim_configs['pixel_per_meter']
         use_model = determine_use_model(mode) #determine if the mode requires lama model
@@ -262,10 +266,20 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                 os.makedirs(dir_path)
         gt_map_save_path = os.path.join(exp_dir, 'gt_map.png')
         odom_npy_save_path = os.path.join(exp_dir, 'odom.npy')
+        trust_estimator = None
+        if mode in ['fixed-pipe', 'adaptive-pipe']:
+            trust_cfg = collect_opts.adaptive_trust
+            trust_estimator = OnlineReliability(
+                beta=trust_cfg.beta, k=trust_cfg.k,
+                initial_reliability=trust_cfg.initial_reliability,
+                min_new_cells=trust_cfg.min_new_cells,
+                snapshot_dir=os.path.join(exp_dir, 'prediction_snapshots'))
+            trust_log_path = os.path.join(exp_dir, 'online_reliability.jsonl')
+            decision_log_path = os.path.join(exp_dir, 'frontier_decisions.jsonl')
 
 
         # Visualization Setup 
-        if mode in ['pipe', 'mapex']:
+        if mode in ['pipe', 'mapex', 'fixed-pipe', 'adaptive-pipe']:
             plt_row = 2
             plt_col = 2
             fig, ax = plt.subplots(plt_row, plt_col, figsize=(20, 10))
@@ -361,6 +375,8 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
 
         # Choose the appropriate time step based on whether logging is enabled
         time_step = time_settings[category][0] if collect_opts.log_iou else time_settings[category][1]
+        if collect_opts.get('max_steps') is not None:
+            time_step = min(time_step, int(collect_opts.max_steps))
 
         iou_90_flag = False
         iou_95_flag = False
@@ -369,6 +385,11 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
         with context as log_file:
             for t in range(time_step):
                 start_mission_i_time = time.time()
+                if trust_estimator is not None:
+                    trust_event = trust_estimator.observe(
+                        t, get_padded_obs_map(mapper.obs_map))
+                    with open(trust_log_path, 'a') as trust_log:
+                        trust_log.write(json.dumps(trust_event) + '\n')
                 show_plt = (t % collect_opts.show_plt_freq == 0) or (t == collect_opts.mission_time - 1)
                 
                 # Frontier detection
@@ -462,6 +483,25 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                         
                         padded_obs_map = get_padded_obs_map(mapper.obs_map)
                         padded_gt_map = get_padded_gt_map(mapper.gt_map)
+                        degradation_strength = float(collect_opts.get(
+                            'prediction_degradation_strength', 0.0))
+                        if use_model and (trust_estimator is not None or
+                                          degradation_strength > 0):
+                            prediction_probability = np.clip(
+                                lama_pred_alltrain['inpainted'][0][0].detach().cpu().numpy(),
+                                0.0, 1.0)
+                            if degradation_strength > 0:
+                                prediction_probability = degrade_unknown_geometry(
+                                    prediction_probability, padded_obs_map,
+                                    degradation_strength)
+                                mean_map = degrade_unknown_geometry(
+                                    mean_map, padded_obs_map,
+                                    degradation_strength)
+                                pred_maputils = (prediction_probability > 0.5).astype(np.float64)
+                        if trust_estimator is not None:
+                            trust_estimator.capture(
+                                t, prediction_probability, padded_obs_map,
+                                padding=[pad_h1, pad_h2, pad_w1, pad_w2])
 
                         if mode == 'upen': # not a frontier-based approach, but we will output UPEN RRT goal as a frontier to visit to use go to frontier logic
                             upen_path = None
@@ -501,7 +541,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                             frontier_region_centers_unscored, filtered_map, num_large_regions = frontier_planner.get_frontier_centers_given_obs_map(mapper.obs_map)
                             
 
-                            if mode in ['pipe', 'pw-nbv-2d']: # Do pathwise method
+                            if mode in ['pipe', 'pw-nbv-2d', 'fixed-pipe', 'adaptive-pipe']: # Do pathwise method
                                 # Initialize an empty path collection and a new list for valid frontiers
                                 path_collection = []
                                 valid_frontiers_unscored = []
@@ -515,9 +555,28 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                                         valid_frontiers_unscored.append(frontier)
                                         path_collection.append(path)
 
-                                frontier_region_centers, frontier_cost_list, viz_most_flooded_grid, viz_medium_flooded_grid, best_ind, medium_ind, locked_frontier_center \
-                                    = frontier_planner.score_frontiers_pathwise(t, valid_frontiers_unscored, path_collection, pred_maputils, pred_vis_configs, \
-                                                                            obs_map=padded_obs_map, mean_map=mean_map, var_map=var_map)    
+                                if mode in ['fixed-pipe', 'adaptive-pipe']:
+                                    reliability = (float(trust_cfg.fixed_reliability)
+                                                   if mode == 'fixed-pipe'
+                                                   else trust_estimator.reliability)
+                                    result, diagnostics = frontier_planner.score_frontiers_adaptive(
+                                        t, valid_frontiers_unscored, path_collection,
+                                        pred_maputils, pred_vis_configs,
+                                        obs_map=padded_obs_map, mean_map=mean_map,
+                                        var_map=var_map, reliability=reliability)
+                                    (frontier_region_centers, frontier_cost_list,
+                                     viz_most_flooded_grid, viz_medium_flooded_grid,
+                                     best_ind, medium_ind, locked_frontier_center) = result
+                                    diagnostics['step'] = t
+                                    diagnostics['frontier_centers'] = frontier_region_centers.tolist()
+                                    diagnostics['online_reliability'] = trust_estimator.reliability
+                                    with open(decision_log_path, 'a') as decision_log:
+                                        decision_log.write(json.dumps(diagnostics,
+                                                                      allow_nan=False) + '\n')
+                                else:
+                                    frontier_region_centers, frontier_cost_list, viz_most_flooded_grid, viz_medium_flooded_grid, best_ind, medium_ind, locked_frontier_center \
+                                        = frontier_planner.score_frontiers_pathwise(t, valid_frontiers_unscored, path_collection, pred_maputils, pred_vis_configs, \
+                                                                                obs_map=padded_obs_map, mean_map=mean_map, var_map=var_map)
                             
                             else: # Do point-wise method
                                 frontier_region_centers, frontier_cost_list, viz_most_flooded_grid, viz_medium_flooded_grid, best_ind, medium_ind = \
@@ -526,13 +585,26 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                                                                             obs_map=padded_obs_map, mean_map=mean_map, var_map=var_map)
                                 locked_frontier_center = frontier_region_centers[np.argmin(frontier_cost_list)]
 
+                            reselected_frontier = False
                             while not is_locked_frontier_center_valid(locked_frontier_center, occ_grid_pyastar, cur_pose, collect_opts, pixel_per_meter):
                                 print("Invalid locked frontier center, reselecting")
+                                reselected_frontier = True
                                 frontier_selected, locked_frontier_center, frontier_region_centers, frontier_cost_list = reselect_frontier_from_frontier_region_centers(frontier_region_centers, frontier_cost_list, t, start_exp_time, mission_status_save_path)
                                 if not frontier_selected:
                                     mission_failed = True
                                     update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=False, fail_reason="frontier_region_centers", mission_status_save_path=mission_status_save_path)
                                     break
+                            if mission_failed:
+                                break
+                            if reselected_frontier and mode in ['pipe', 'pw-nbv-2d', 'fixed-pipe', 'adaptive-pipe']:
+                                # The fallback removes candidates from the scored array.
+                                # Original best/second indices and visibility overlays no
+                                # longer refer to the shortened array.
+                                best_ind = -1
+                                medium_ind = (int(np.argmin(frontier_cost_list))
+                                              if len(frontier_cost_list) else -1)
+                                viz_most_flooded_grid = None
+                                viz_medium_flooded_grid = None
 
                 else: # Hector Explorer Baseline, from frontier clusters (frontier region centers), make a cost map
                     if do_hector_plan: # Do Hector cost map calculation every 1 time steps
@@ -639,7 +711,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                         else:
                             frontier_colors = -frontier_cost_list
                             
-                        if mode == 'pipe' or mode == 'pw-nbv-2d':
+                        if mode in ['pipe', 'pw-nbv-2d', 'fixed-pipe', 'adaptive-pipe']:
                             # Check the length of frontier_colors to avoid accessing out-of-bounds elements
                             if len(frontier_colors) > 0:
                                 # Plot the best frontier with size 20 and its color
@@ -647,14 +719,18 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                                             locked_frontier_center[0] - pd_size,
                                             c='r', s=20, marker='x', cmap='plasma')
 
-                            if len(frontier_colors) > 1:
+                            if (len(frontier_colors) > 1 and medium_ind is not None
+                                    and 0 <= medium_ind < len(frontier_region_centers)):
                                 # Plot the second-best frontier with size 10 and its color (only if available)
                                 ax_gt.scatter(np.array(frontier_region_centers)[medium_ind, 1] - pd_size,
                                             np.array(frontier_region_centers)[medium_ind, 0] - pd_size,
                                             c='b', s=10, marker='x', cmap='plasma')
 
                             # Plot the remaining frontiers with size 5 and a neutral color (e.g., gray)
-                            remaining_indices = [i for i in range(len(frontier_region_centers)) if i not in [best_ind, medium_ind]]
+                            highlighted = [index for index in [best_ind, medium_ind]
+                                           if index is not None and index >= 0]
+                            remaining_indices = [i for i in range(len(frontier_region_centers))
+                                                 if i not in highlighted]
 
                             if len(remaining_indices) > 0:
                                 ax_gt.scatter(np.array(frontier_region_centers)[remaining_indices, 1] - pd_size,
@@ -725,7 +801,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                                 #red = "#ed0c0c"
                                 blue = "#0000FF"
                                 orange = "#FF9F1C"
-                                if mode == 'pipe':
+                                if mode in ['pipe', 'fixed-pipe', 'adaptive-pipe']:
                                     colors = [white, orange]
                                 else:
                                     colors = [white, blue]
@@ -781,7 +857,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                                         most_flooded_grid = viz_most_flooded_grid#[pd_size:-pd_size,pd_size:-pd_size]
                                         flooded_ind = np.where(most_flooded_grid==True)
                                         flooded_ind_colors_alpha = np.zeros((mean_map.shape[0],mean_map.shape[1],4))
-                                        if mode == 'pipe':
+                                        if mode in ['pipe', 'fixed-pipe', 'adaptive-pipe']:
                                             flooded_ind_colors_alpha[flooded_ind[0],flooded_ind[1],:] = (0, 0, 1, 0.15) #blue color for visibility mask
                                         else:
                                             flooded_ind_colors_alpha[flooded_ind[0],flooded_ind[1],:] = (255/255,159/255,28/255,0.3) #orange color for visibility mask
@@ -862,9 +938,9 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
         update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=False, fail_reason=str(e), mission_status_save_path=mission_status_save_path)
     
 def determine_use_model(mode):
-    possible_mode_list = 'nearest', 'nbv-2d', 'onlyvar', 'visunk', 'visvar', 'mapex', 'upen', 'hectoraug', 'pipe', 'pw-nbv-2d'
+    possible_mode_list = 'nearest', 'nbv-2d', 'onlyvar', 'visunk', 'visvar', 'mapex', 'upen', 'hectoraug', 'pipe', 'pw-nbv-2d', 'fixed-pipe', 'adaptive-pipe'
     assert mode in possible_mode_list, "mode must be one of {}".format(possible_mode_list)
-    if mode == 'onlyvar' or mode == 'visunk' or mode == 'visvar' or mode == 'mapex' or mode == 'pipe':
+    if mode in ['onlyvar', 'visunk', 'visvar', 'mapex', 'pipe', 'fixed-pipe', 'adaptive-pipe']:
         use_model = True 
     elif mode == 'nearest' or mode == 'nbv-2d'  or mode == 'pw-nbv-2d': 
         use_model = False
@@ -884,16 +960,30 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--collect_world_list', nargs='+', help='List of worlds to collect data from')
     parser.add_argument('--start_pose', nargs='+', help='List of start pose')
+    parser.add_argument('--config', default=data_collect_config_name,
+                        help='YAML configuration in configs/ (default: base.yaml)')
+    parser.add_argument('--modes', nargs='+', help='Override configured exploration modes')
+    parser.add_argument('--max-steps', type=int, help='Cap steps for a smoke test')
+    parser.add_argument('--output-folder', help='Output path relative to repository root')
+    parser.add_argument('--seed', type=int, help='Paired-run random seed')
     args = parser.parse_args()
     
     # Auto-detect root path (PIPE directory is parent of scripts directory)
     script_dir = os.path.dirname(os.path.abspath(__file__))
     root_path = os.path.dirname(script_dir)
     
-    collect_opts = get_options_dict_from_yml(data_collect_config_name)
+    collect_opts = get_options_dict_from_yml(args.config)
     collect_opts.root_path = root_path  # Set root_path dynamically
     if args.collect_world_list is not None:
         collect_opts.collect_world_list = args.collect_world_list
+    if args.modes is not None:
+        collect_opts.modes_to_test = args.modes
+    if args.max_steps is not None:
+        collect_opts.max_steps = args.max_steps
+    if args.output_folder is not None:
+        collect_opts.output_folder_name = args.output_folder
+    if args.seed is not None:
+        collect_opts.seed = args.seed
     if args.start_pose is not None: 
         start_pose = []
         for pose_elem in args.start_pose:
@@ -955,4 +1045,3 @@ if __name__ == '__main__':
     
     for run_exploration_arg in run_exploration_args:
         run_exploration_comparison_for_map(run_exploration_arg)
-
